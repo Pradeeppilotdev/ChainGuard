@@ -1,30 +1,161 @@
-# chain-guard
+# ChainGuard Investigator Agent
 
-Welcome to your new [Mastra](https://mastra.ai/) project! We're excited to see what you'll build.
+## Overview
 
-## Getting Started
+The Investigator Agent is a Mastra AI agent that acts as a secondary fraud detection layer for suspicious UPI transactions. It receives transactions flagged by the Analyst Agent (score > 40) and performs deep investigation to deliver a final verdict.
 
-Start the development server:
+## Technical Architecture
 
-```shell
-npm run dev
+### Agent Definition (`src/mastra/agents/investigatorAgent.ts`)
+
+The agent is built on Mastra's `Agent` class with:
+
+- **ID**: `investigator-agent`
+- **Model**: Configured via `weatherAgent` (delegates to underlying LLM)
+- **Memory**: Uses `Memory` for conversation context
+
+### Tools
+
+The agent uses two tools defined in `src/tools/tools.ts`:
+
+| Tool | Purpose |
+|------|---------|
+| `analyzeThoughtTrace` | Retrieves the Analyst Agent's scoring breakdown and triggered rules for the transaction |
+| `queryMuleRegistry` | Queries the mule registry database for the sender's transaction history, fraud flags, and behavioral patterns |
+
+#### analyzeThoughtTrace
+
+```typescript
+input: { transaction_id: string }
+output: {
+  score: number
+  triggered_rules: Array<{rule: string, detail: string, weight: number}>
+}
 ```
 
-Open [http://localhost:4111](http://localhost:4111) in your browser to access [Mastra Studio](https://mastra.ai/docs/studio/overview). It provides an interactive UI for building and testing your agents, along with a REST API that exposes your Mastra application as a local service. This lets you start building without worrying about integration right away.
+Uses `requestContext` to verify transaction details match and retrieve analyst output.
 
-You can start editing files inside the `src/mastra` directory. The development server will automatically reload whenever you make changes.
+#### queryMuleRegistry
 
-## Learn more
+```typescript
+input: { upi_id: string }
+output: {
+  first_seen: string
+  total_transactions: number
+  flagged_count: number
+  avg_amount: number
+  max_amount: number
+  unique_receivers_count: number
+  is_blacklisted: boolean
+  connected_flagged_accounts: number
+}
+```
 
-To learn more about Mastra, visit our [documentation](https://mastra.ai/docs/). Your bootstrapped project includes example code for [agents](https://mastra.ai/docs/agents/overview), [tools](https://mastra.ai/docs/agents/using-tools), [workflows](https://mastra.ai/docs/workflows/overview), [scorers](https://mastra.ai/docs/evals/overview), and [observability](https://mastra.ai/docs/observability/overview).
+#### Mock Data Generation
 
-If you're new to AI agents, check out our [course](https://mastra.ai/learn) and [YouTube videos](https://youtube.com/@mastra-ai). You can also join our [Discord](https://discord.gg/BTYqqHKUrf) community to get help and share your projects.
+The tool uses `mockMuleRegistryData()` function to generate deterministic mock data based on the UPI ID:
 
-## Deploy to the Mastra platform
+```typescript
+const mockMuleRegistryData = (upiId: string) => {
+  const seed = Array.from(upiId).reduce((acc, char) => acc + char.charCodeAt(0), 0);
 
-The [Mastra platform](https://projects.mastra.ai) provides two products for deploying and managing AI applications built with the Mastra framework:
+  const accountAgeDays = 2 + (seed % 12);
+  const totalTransactions = 18 + (seed % 55);
+  const flaggedCount = Math.max(2, Math.floor(totalTransactions * (0.1 + (seed % 7) / 100)));
+  const avgAmount = 600 + (seed % 1800);
+  const maxAmount = avgAmount * (14 + (seed % 24));
+  const uniqueReceivers = 9 + (seed % 26);
+  const connectedFlaggedAccounts = 2 + (seed % 6);
+  const isBlacklisted = seed % 9 === 0 || flaggedCount >= 8 || connectedFlaggedAccounts >= 5;
 
-- **Studio**: A hosted visual environment for testing agents, running workflows, and inspecting traces
-- **Server**: A production deployment target that runs your Mastra application as an API server
+  return { ... };
+};
+```
 
-Learn more in the [Mastra platform documentation](https://mastra.ai/docs/mastra-platform/overview).
+**How it works:**
+- **Seed**: Sum of all character codes in the UPI ID string
+- **Deterministic**: Same UPI ID always produces the same data (useful for testing)
+- **Calculated fields**: Uses modulo operations to generate realistic-looking fraud indicators
+- **Blacklist logic**: Account is blacklisted if `(seed % 9 === 0)` OR `flaggedCount >= 8` OR `connectedFlaggedAccounts >= 5`
+
+This mock simulates real fraud patterns for demo/development without requiring actual database access.
+
+### Input Schema (`investigatorInputSchema`)
+
+```typescript
+{
+  transaction: {
+    transaction_id: string
+    sender_upi: string
+    receiver_upi: string
+    amount: number
+    timestamp: string
+  }
+  analyst_output: {
+    score: number
+    triggered_rules: Array<{rule, detail, weight}>
+  }
+}
+```
+
+### Output Schema (`investigatorVerdictSchema`)
+
+```typescript
+{
+  verdict: 'SAFE' | 'REVIEW' | 'BLOCK'
+  confidence: number (0-1)
+  reasoning: string
+  tools_used: string[]
+  evidence: {
+    account_age_days: number
+    prior_flags: number
+    is_blacklisted: boolean
+    connected_flagged_accounts: number
+    amount_ratio: number
+    analyst_score: number
+    triggered_rules: string[]
+  }
+}
+```
+
+## Investigation Flow
+
+1. **Receive Transaction**: Agent receives suspicious transaction with Analyst's scoring context
+2. **Call `analyzeThoughtTrace`**: Retrieve what the Analyst Agent already found
+3. **Call `queryMuleRegistry`**: Get sender's fraud history and behavioral patterns
+4. **Reason**: Combine evidence from both tools to reach a conclusion
+5. **Return Verdict**: Structured verdict with confidence score
+
+## Verdict Logic
+
+| Condition | Verdict |
+|-----------|---------|
+| Combined evidence weak or contradictory | SAFE |
+| 1-2 moderate signals with no blacklist | REVIEW |
+| 2+ strong signals OR blacklisted OR connected to flagged accounts | BLOCK |
+
+## Usage
+
+```typescript
+import { runInvestigation } from './mastra/agents/investigatorAgent';
+
+const verdict = await runInvestigation({
+  transaction: { ... },
+  analyst_output: { score: 65, triggered_rules: [...] }
+});
+```
+
+## Report Generation
+
+Use `formatInvestigationReport()` to generate a markdown report for the merchant dashboard:
+
+```typescript
+const report = formatInvestigationReport(input, verdict);
+```
+
+Returns formatted markdown with:
+- Transaction details
+- Verdict with confidence percentage
+- Evidence summary
+- Triggered rules
+- Reasoning
