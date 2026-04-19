@@ -7,10 +7,12 @@ import { MastraCompositeStore } from '@mastra/core/storage';
 import { Observability, DefaultExporter, CloudExporter, SensitiveDataFilter } from '@mastra/observability';
 import { analystAgent } from './agents/analystAgent';
 import { investigatorAgent } from './agents/investigatorAgent';
+import { cgWorkflow } from './workflows/cgworkflow';
 import { toolCallAppropriatenessScorer, completenessScorer, translationScorer } from './scorers/weather-scorer';
 
 export const mastra = new Mastra({
-  agents: { analystAgent,investigatorAgent },
+  agents: { analystAgent, investigatorAgent },
+  workflows: { cgWorkflow },
   scorers: { toolCallAppropriatenessScorer, completenessScorer, translationScorer },
   storage: new MastraCompositeStore({
     id: 'composite-storage',
@@ -20,6 +22,10 @@ export const mastra = new Mastra({
     }),
     domains: {
       observability: await new DuckDBStore().getStore('observability'),
+      reports: new LibSQLStore({
+        id: "reports-storage",
+        url: "file:./reports.db",
+      }),
     }
   }),
   logger: new PinoLogger({
