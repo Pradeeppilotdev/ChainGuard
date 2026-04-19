@@ -1,7 +1,8 @@
 import { createStep, createWorkflow } from '@mastra/core/workflows';
 import { z } from 'zod';
+import { analystAgent } from '../agents/analystAgent';
 import { investigatorAgent, investigatorVerdictSchema, formatInvestigationReport } from '../agents/investigatorAgent';
-import { investigatorInputSchema, transactionSchema, analystOutputSchema } from '../../tools/tools';
+import { transactionSchema, analystOutputSchema } from '../../tools/tools';
 import { saveReport, updateUpiStatus } from '../../db/setup';
 
 const extractJsonObject = (text: string) => {
@@ -19,14 +20,44 @@ const extractJsonObject = (text: string) => {
 	return text.slice(firstBrace, lastBrace + 1).trim();
 };
 
-// The step where the output of Analyst agent is passed to the Investigator agent
+const analystStep = createStep({
+	id: 'analyst-step',
+	inputSchema: transactionSchema,
+	outputSchema: analystOutputSchema,
+	execute: async ({ inputData, requestContext }) => {
+		requestContext.set('transaction', inputData);
+
+		const result = await analystAgent.generate(
+			[
+				{
+					role: 'user',
+					content: JSON.stringify(inputData),
+				},
+			],
+			{
+				requestContext,
+				maxSteps: 3,
+			},
+		);
+
+		const parsed = JSON.parse(extractJsonObject(result.text));
+		requestContext.set('analyst_output', parsed);
+		return parsed;
+	},
+});
+
 const investigatorStep = createStep({
 	id: 'investigator-step',
-	inputSchema: investigatorInputSchema,
+	inputSchema: analystOutputSchema,
 	outputSchema: investigatorVerdictSchema,
 	execute: async ({ inputData, requestContext }) => {
-		requestContext.set('transaction', inputData.transaction);
-		requestContext.set('analyst_output', inputData.analyst_output);
+		const transaction = requestContext.get('transaction') as z.infer<typeof transactionSchema>;
+		const analystOutput = inputData;
+
+		const investigatorInput = {
+			transaction,
+			analyst_output: analystOutput,
+		};
 
 		const result = await investigatorAgent.generate(
 			[
@@ -58,7 +89,7 @@ IMPORTANT:
 - Do NOT skip any fields
 
 ${JSON.stringify(
-						inputData,
+						investigatorInput,
 						null,
 						2,
 					)}`,
@@ -106,9 +137,10 @@ const dbStoreStep = createStep({
 
 const cgWorkflow = createWorkflow({
   id: 'cg-workflow',
-  inputSchema: investigatorInputSchema,
+  inputSchema: transactionSchema,
   outputSchema: investigatorVerdictSchema,
 })
+  .then(analystStep)
   .then(investigatorStep)
   .then(dbStoreStep);
 
