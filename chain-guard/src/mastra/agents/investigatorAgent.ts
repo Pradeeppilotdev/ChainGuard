@@ -2,7 +2,7 @@ import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
 import { RequestContext } from '@mastra/core/request-context';
 import { z } from 'zod';
-import { weatherAgent } from './weather-agent';
+// import { weatherAgent } from './weather-agent';
 import {
   analyzeThoughtTrace,
   investigatorInputSchema,
@@ -102,7 +102,7 @@ ALWAYS ground your reasoning in specific evidence from your tool results.
 Never make claims not supported by tool output.
 Be concise but specific - your reasoning becomes the merchant's legitimacy report.
 `,
-  model: weatherAgent.model,
+  model: 'groq/llama-3.3-70b-versatile',
   tools: {
     analyzeThoughtTrace,
     queryMuleRegistry,
