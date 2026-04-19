@@ -1,109 +1,97 @@
-# ChainGuard Investigator Agent
+# ChainGuard
 
 ## Overview
 
-The Investigator Agent is a Mastra AI agent that acts as a secondary fraud detection layer for suspicious UPI transactions. It receives transactions flagged by the Analyst Agent (score > 40) and performs deep investigation to deliver a final verdict.
+ChainGuard is a fraud detection middleware for UPI transactions. It uses a two-agent pipeline:
+1. **Analyst Agent** - scores transactions against fraud rules
+2. **Investigator Agent** - performs deep investigation for high-risk transactions
 
-## Technical Architecture
+Results are stored in a local SQLite database for reporting and lookup.
 
-### Agent Definition (`src/mastra/agents/investigatorAgent.ts`)
+## Architecture
 
-The agent is built on Mastra's `Agent` class with:
+### Agents
 
-- **ID**: `investigator-agent`
-- **Model**: Configured via `weatherAgent` (delegates to underlying LLM)
-- **Memory**: Uses `Memory` for conversation context
+| Agent | File | Purpose |
+|-------|------|---------|
+| `analyst-agent` | `src/mastra/agents/analystAgent.ts` | First-line fraud scoring |
+| `investigator-agent` | `src/mastra/agents/investigatorAgent.ts` | Deep investigation |
 
-### Tools
+### Workflow
 
-The agent uses two tools defined in `src/tools/tools.ts`:
+The `cg-workflow` (`src/mastra/workflows/cgworkflow.ts`) chains 3 steps:
 
-| Tool | Purpose |
-|------|---------|
-| `analyzeThoughtTrace` | Retrieves the Analyst Agent's scoring breakdown and triggered rules for the transaction |
-| `queryMuleRegistry` | Queries the mule registry database for the sender's transaction history, fraud flags, and behavioral patterns |
-
-#### analyzeThoughtTrace
-
-```typescript
-input: { transaction_id: string }
-output: {
-  score: number
-  triggered_rules: Array<{rule: string, detail: string, weight: number}>
-}
+```
+transaction → analystStep → investigatorStep → dbStoreStep
 ```
 
-Uses `requestContext` to verify transaction details match and retrieve analyst output.
+1. **analystStep** - Calls `analystAgent` to score transaction
+2. **investigatorStep** - Calls `investigatorAgent` with analyst output
+3. **dbStoreStep** - Saves report + UPI status to database
 
-#### queryMuleRegistry
+### Database
 
-```typescript
-input: { upi_id: string }
-output: {
-  first_seen: string
-  total_transactions: number
-  flagged_count: number
-  avg_amount: number
-  max_amount: number
-  unique_receivers_count: number
-  is_blacklisted: boolean
-  connected_flagged_accounts: number
-}
+Uses LibSQL (`@mastra/libsql`) with two files:
+
+| File | Tables | Purpose |
+|------|--------|---------|
+| `mastra.db` | Mastra internal | Workflow state, memory |
+| `reports.db` | `reports`, `upi_status` | Investigation results |
+
+#### reports table
+
+```sql
+CREATE TABLE reports (
+  id TEXT PRIMARY KEY,
+  upi_id TEXT NOT NULL,
+  markdown_result TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+)
 ```
 
-#### Mock Data Generation
+#### upi_status table
 
-The tool uses `mockMuleRegistryData()` function to generate deterministic mock data based on the UPI ID:
-
-```typescript
-const mockMuleRegistryData = (upiId: string) => {
-  const seed = Array.from(upiId).reduce((acc, char) => acc + char.charCodeAt(0), 0);
-
-  const accountAgeDays = 2 + (seed % 12);
-  const totalTransactions = 18 + (seed % 55);
-  const flaggedCount = Math.max(2, Math.floor(totalTransactions * (0.1 + (seed % 7) / 100)));
-  const avgAmount = 600 + (seed % 1800);
-  const maxAmount = avgAmount * (14 + (seed % 24));
-  const uniqueReceivers = 9 + (seed % 26);
-  const connectedFlaggedAccounts = 2 + (seed % 6);
-  const isBlacklisted = seed % 9 === 0 || flaggedCount >= 8 || connectedFlaggedAccounts >= 5;
-
-  return { ... };
-};
+```sql
+CREATE TABLE upi_status (
+  upi_id TEXT UNIQUE NOT NULL,
+  is_blocked INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT (datetime('now'))
+)
 ```
 
-**How it works:**
-- **Seed**: Sum of all character codes in the UPI ID string
-- **Deterministic**: Same UPI ID always produces the same data (useful for testing)
-- **Calculated fields**: Uses modulo operations to generate realistic-looking fraud indicators
-- **Blacklist logic**: Account is blacklisted if `(seed % 9 === 0)` OR `flaggedCount >= 8` OR `connectedFlaggedAccounts >= 5`
+## Schemas
 
-This mock simulates real fraud patterns for demo/development without requiring actual database access.
-
-### Input Schema (`investigatorInputSchema`)
+### transactionSchema
 
 ```typescript
 {
-  transaction: {
-    transaction_id: string
-    sender_upi: string
-    receiver_upi: string
-    amount: number
-    timestamp: string
-  }
-  analyst_output: {
-    score: number
-    triggered_rules: Array<{rule, detail, weight}>
-  }
+  transaction_id: string
+  sender_upi: string
+  receiver_upi: string
+  amount: number
+  timestamp: string
 }
 ```
 
-### Output Schema (`investigatorVerdictSchema`)
+### analystOutputSchema
+
+```typescript
+{
+  score: number
+  triggered_rules: Array<{
+    rule: string
+    detail: string
+    weight: number
+  }>
+}
+```
+
+### investigatorVerdictSchema
 
 ```typescript
 {
   verdict: 'SAFE' | 'REVIEW' | 'BLOCK'
-  confidence: number (0-1)
+  confidence: number
   reasoning: string
   tools_used: string[]
   evidence: {
@@ -118,44 +106,76 @@ This mock simulates real fraud patterns for demo/development without requiring a
 }
 ```
 
-## Investigation Flow
+## Tools
 
-1. **Receive Transaction**: Agent receives suspicious transaction with Analyst's scoring context
-2. **Call `analyzeThoughtTrace`**: Retrieve what the Analyst Agent already found
-3. **Call `queryMuleRegistry`**: Get sender's fraud history and behavioral patterns
-4. **Reason**: Combine evidence from both tools to reach a conclusion
-5. **Return Verdict**: Structured verdict with confidence score
+### scoreTransaction (`analystAgent`)
 
-## Verdict Logic
+Scoring rules in `src/mastra/agents/analystAgent.ts`:
 
-| Condition | Verdict |
-|-----------|---------|
-| Combined evidence weak or contradictory | SAFE |
-| 1-2 moderate signals with no blacklist | REVIEW |
-| 2+ strong signals OR blacklisted OR connected to flagged accounts | BLOCK |
+| Rule | Condition | Weight |
+|------|-----------|--------|
+| NEW_ACCOUNT | Account < 30 days | 25 |
+| HIGH_VELOCITY | > 5 txns in 60 min | 30 |
+| AMOUNT_SPIKE | Amount > 5x average | 25 |
+| ODD_HOURS | 1-4 AM | 10 |
+| FIRST_TIME_RECEIVER | Never transacted with receiver | 10 |
+
+### analyzeThoughtTrace, queryMuleRegistry (`investigatorAgent`)
+
+Defined in `src/tools/tools.ts`.
+
+`queryMuleRegistry` uses deterministic mock data based on UPI ID.
 
 ## Usage
 
-```typescript
-import { runInvestigation } from './mastra/agents/investigatorAgent';
+Start Mastra Studio:
 
-const verdict = await runInvestigation({
-  transaction: { ... },
-  analyst_output: { score: 65, triggered_rules: [...] }
+```bash
+npm run dev
+```
+
+Call workflow directly:
+
+```typescript
+import { mastra } from './mastra';
+import { z } from 'zod';
+
+const workflow = mastra.workflows.cgWorkflow;
+const result = await workflow.run({
+  input: {
+    transaction_id: 'txn_123',
+    sender_upi: 'user@ybl',
+    receiver_upi: 'merchant@okicici',
+    amount: 5000,
+    timestamp: new Date().toISOString()
+  }
 });
 ```
 
 ## Report Generation
 
-Use `formatInvestigationReport()` to generate a markdown report for the merchant dashboard:
+Use `formatInvestigationReport()` to generate markdown:
 
 ```typescript
+import { formatInvestigationReport } from './mastra/agents/investigatorAgent';
+
 const report = formatInvestigationReport(input, verdict);
 ```
 
-Returns formatted markdown with:
-- Transaction details
-- Verdict with confidence percentage
-- Evidence summary
-- Triggered rules
-- Reasoning
+## Database Helpers
+
+In `src/db/setup.ts`:
+
+```typescript
+import { saveReport, updateUpiStatus, getReport, getUpiStatus } from './db/setup';
+
+// Save investigation result
+await saveReport({ id, upiId, markdownResult });
+
+// Update blocked status
+await updateUpiStatus('user@ybl', true); // true = blocked, false = not blocked
+
+// Query
+await getReport(id);
+await getUpiStatus('user@ybl'); // returns boolean or null
+```
