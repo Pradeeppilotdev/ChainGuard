@@ -4,6 +4,8 @@ import { analystAgent } from '../agents/analystAgent';
 import { investigatorAgent, investigatorVerdictSchema, formatInvestigationReport } from '../agents/investigatorAgent';
 import { transactionSchema, analystOutputSchema } from '../../tools/tools';
 import { saveReport, updateUpiStatus } from '../../db/setup';
+import { threadName } from 'node:worker_threads';
+import { create } from 'node:domain';
 
 const extractJsonObject = (text: string) => {
 	const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -107,6 +109,46 @@ ${JSON.stringify(
 	},
 });
 
+const skipInvestigatorStep = createStep({
+	id: 'skip-investigator-step',
+	inputSchema: analystOutputSchema,
+	outputSchema: investigatorVerdictSchema,
+
+	execute: async({inputData}) => {
+		return {
+			verdict: 'SAFE' as const,
+			confidence: 1,
+			reasoning: `Skipped — analyst score ${inputData.score} is below threshold (40).`,
+			tools_used: [],
+			evidence: {
+				account_age_days: 0,
+        		prior_flags: 0,
+        		is_blacklisted: false,
+        		connected_flagged_accounts: 0,
+        		amount_ratio: 0,
+        		analyst_score: inputData.score,
+        		triggered_rules: [],
+			},
+		};
+	},
+});
+
+
+const mergeBranchStep = createStep({
+	id: 'merge-branch-step',
+	inputSchema: z.object({
+		'investigator-step': investigatorVerdictSchema.optional(),
+		'skip-investigator-step': investigatorVerdictSchema.optional(),
+	}),
+	outputSchema: investigatorVerdictSchema,
+	execute: async ({inputData}) => {
+		const result = inputData['investigator-step'] ?? inputData['skip-investigator-step'];
+		if(!result) throw new Error("No branch result found")
+			return result;
+	}
+
+})
+
 
 const dbStoreStep = createStep({
   id: 'db-store-step',
@@ -141,8 +183,18 @@ const cgWorkflow = createWorkflow({
   outputSchema: investigatorVerdictSchema,
 })
   .then(analystStep)
-  .then(investigatorStep)
-  .then(dbStoreStep);
+  .branch([
+	[
+		async ({inputData}) => inputData.score >= 40,
+		investigatorStep
+	],
+	[
+		async ({inputData}) => inputData.score < 40,
+		skipInvestigatorStep,
+	]
+  ])
+  .then(mergeBranchStep)
+  .then(dbStoreStep)
 
 cgWorkflow.commit();
 
