@@ -22,6 +22,7 @@ const extractJsonObject = (text: string) => {
 	return text.slice(firstBrace, lastBrace + 1).trim();
 };
 
+// Analyst Agent step : Gets initial input and passes the result of analysis to InvestigatorAgentStep
 const analystStep = createStep({
 	id: 'analyst-step',
 	inputSchema: transactionSchema,
@@ -48,6 +49,7 @@ const analystStep = createStep({
 	},
 });
 
+// Investigator Agent Step : Gets the output of analyst agent and provides a clear investigation report
 const investigatorStep = createStep({
 	id: 'investigator-step',
 	inputSchema: analystOutputSchema,
@@ -109,6 +111,8 @@ ${JSON.stringify(
 	},
 });
 
+// Skip Investigator Agent step : If the score returned by ANalyst agent is less than 40 (meaning it is safe), then this step is executed.
+// This returns output in same schema as 'InvestigatorAgent' but with verdice "SAFE" and investigation results as 0s.
 const skipInvestigatorStep = createStep({
 	id: 'skip-investigator-step',
 	inputSchema: analystOutputSchema,
@@ -133,7 +137,11 @@ const skipInvestigatorStep = createStep({
 	},
 });
 
-
+// Merging Step: Merges both InvestigatorAgentStep and skipInvestigatorAgentStep and provides a output in standard schema
+// This is because the dbStoreStep looks at the branch and will throw a TypeScript type error.
+// Even though schemas of both step is same, TS will see them as two separate schemas returned by two different steps.
+// This causes a confusion of what will be passed to the dbStoreStep
+// This step takes any output schemas from both steps and provide a standard scheme that dbStoreStep accepts
 const mergeBranchStep = createStep({
 	id: 'merge-branch-step',
 	inputSchema: z.object({
@@ -149,7 +157,9 @@ const mergeBranchStep = createStep({
 
 })
 
-
+// Data Storing Step : Takes the output of investigatorAgentStep and saves into LibSQL db
+// Both report markdown and individual blocked status is stored in separate tables
+// Helper functions in a separate setup file will be taking care of storing datas
 const dbStoreStep = createStep({
   id: 'db-store-step',
   inputSchema: investigatorVerdictSchema,
@@ -177,6 +187,7 @@ const dbStoreStep = createStep({
   },
 });
 
+// Chain Guard Workflow : Final workflow
 const cgWorkflow = createWorkflow({
   id: 'cg-workflow',
   inputSchema: transactionSchema,
