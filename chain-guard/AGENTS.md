@@ -47,13 +47,13 @@ Top-level files define how your Mastra project is configured, built, and connect
 - Load the `mastra` skill before any Mastra-related work
 - Register new agents, tools, workflows, and scorers in `src/mastra/index.ts`
 - Use schemas for tool inputs and outputs
-- Run `npm run build` to verify changes compile
+- un `npm run build` to verify changes compile
 
 ### Never do
 
 - Never commit `.env` files or secrets
 - Never modify `node_modules` or Mastra's database files directly
-- Never hardcode API keys (always use environment variables)
+- **NEVER run `npm run build`, `npm mastra build`, or similar build commands after making changes** unless explicitly asked to do so.
 
 ## Resources
 
