@@ -19,15 +19,28 @@ Results are stored in a local SQLite database for reporting and lookup.
 
 ### Workflow
 
-The `cg-workflow` (`src/mastra/workflows/cgworkflow.ts`) chains 3 steps:
+The `cg-workflow` (`src/mastra/workflows/cgworkflow.ts`) uses branching and merging:
 
 ```
-transaction → analystStep → investigatorStep → dbStoreStep
+transaction → analystStep → branch → mergeBranchStep → dbStoreStep
+                            ↓
+                 ┌───────────┴───────────┐
+                 ↓                       ↓
+        investigatorStep          skipInvestigatorStep
+                 ↓                       ↓
+                 └───────────┬───────────┘
+                             ↓
+                       mergeBranchStep
 ```
 
 1. **analystStep** - Calls `analystAgent` to score transaction
-2. **investigatorStep** - Calls `investigatorAgent` with analyst output
-3. **dbStoreStep** - Saves report + UPI status to database
+2. **Branch** - If score >= 40, calls `investigatorStep`; if score < 40, calls `skipInvestigatorStep` (skips deep investigation)
+3. **mergeBranchStep** - Merges output from both branches into standard schema
+4. **dbStoreStep** - Saves report + UPI status to database
+
+#### Threshold Logic
+
+Transactions with `score < 40` are automatically marked as **SAFE** without deep investigation. This optimizes for low-risk transactions.
 
 ### Database
 
