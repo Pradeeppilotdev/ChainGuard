@@ -1,6 +1,29 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
+// In-memory transaction log — resets on server restart, behaves like real DB during demo
+const transactionLog: Map<string, { timestamp: number; amount: number }[]> = new Map();
 
+export const logTransaction = (senderUpi: string, amount: number) => {
+  const now = Date.now();
+  const existing = transactionLog.get(senderUpi) || [];
+  // Keep only last 60 minutes
+  const recent = existing.filter(t => now - t.timestamp < 60 * 60 * 1000);
+  recent.push({ timestamp: now, amount });
+  transactionLog.set(senderUpi, recent);
+};
+
+export const getRecentTxCount = (senderUpi: string): number => {
+  const now = Date.now();
+  const existing = transactionLog.get(senderUpi) || [];
+  return existing.filter(t => now - t.timestamp < 60 * 60 * 1000).length;
+};
+
+export const getAvgAmount = (senderUpi: string, fallback: number): number => {
+  const existing = transactionLog.get(senderUpi) || [];
+  if (existing.length < 3) return fallback; // not enough history, use fallback
+  const total = existing.reduce((sum, t) => sum + t.amount, 0);
+  return total / existing.length;
+};
 export const triggeredRuleSchema = z.object({
   rule: z.string(),
   detail: z.string(),

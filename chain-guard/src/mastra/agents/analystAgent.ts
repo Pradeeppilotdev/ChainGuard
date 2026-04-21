@@ -5,6 +5,9 @@ import {
   transactionSchema,
   analystOutputSchema,
   triggeredRuleSchema,
+  logTransaction,      // ADD THIS
+  getRecentTxCount,    // ADD THIS
+  getAvgAmount,
 } from '../../tools/tools';
 
 const scoreTransaction = createTool({
@@ -15,12 +18,13 @@ const scoreTransaction = createTool({
 execute: async (transaction) => {
   const triggered: z.infer<typeof triggeredRuleSchema>[] = [];
 
-  // Seed only used for signals that genuinely need a stable mock baseline
   const seed = Array.from(transaction.sender_upi)
     .reduce((acc, c) => acc + c.charCodeAt(0), 0);
 
+  // Log this transaction to the in-memory store FIRST
+  logTransaction(transaction.sender_upi, transaction.amount);
+
   // --- Signal 1: Account Age ---
-  // Only flag if UPI ID looks newly created (short, numeric-heavy, random-looking)
   const hasNumericHeavyId = (transaction.sender_upi.match(/\d/g) || []).length >= 4;
   const accountAgeDays = 2 + (seed % 12);
   if (hasNumericHeavyId && accountAgeDays < 30) {
@@ -32,36 +36,42 @@ execute: async (transaction) => {
   }
 
   // --- Signal 2: Amount Spike ---
-  // This should be the PRIMARY signal — actual amount vs baseline
-  const avgAmount = 600 + (seed % 1800); // sender's typical spend
+  // Use real average from log if we have history, otherwise seed-based fallback
+  const hasRealNamePattern = /^[a-z]+\.[a-z]+\d*@/.test(transaction.sender_upi);
+  const hasBankSuffix = ['okhdfc', 'okicici', 'okhdfcbank', 'okaxis'].some(b =>
+    transaction.sender_upi.includes(b)
+  );
+  const baseAvg = 600 + (seed % 1800);
+  const seedAvg = hasRealNamePattern && hasBankSuffix ? baseAvg * 8 : baseAvg;
+  const avgAmount = getAvgAmount(transaction.sender_upi, seedAvg); // REAL avg if available
+
   const amountRatio = transaction.amount / avgAmount;
   if (amountRatio > 10) {
     triggered.push({
       rule: 'AMOUNT_SPIKE',
-      detail: `₹${transaction.amount} is ${amountRatio.toFixed(1)}x the sender average of ₹${avgAmount}`,
+      detail: `₹${transaction.amount} is ${amountRatio.toFixed(1)}x the sender average of ₹${Math.round(avgAmount)}`,
       weight: 35,
     });
   } else if (amountRatio > 5) {
     triggered.push({
       rule: 'AMOUNT_SPIKE',
-      detail: `₹${transaction.amount} is ${amountRatio.toFixed(1)}x the sender average of ₹${avgAmount}`,
+      detail: `₹${transaction.amount} is ${amountRatio.toFixed(1)}x the sender average of ₹${Math.round(avgAmount)}`,
       weight: 20,
     });
   }
 
   // --- Signal 3: High Velocity ---
-  // Only flag for large amounts — small amounts rarely indicate mule activity
-  const recentTxCount = 3 + (seed % 10);
-  if (recentTxCount > 5 && transaction.amount > 5000) {
+  // Use REAL count from in-memory log
+  const realVelocity = getRecentTxCount(transaction.sender_upi);
+  if (realVelocity > 5 && transaction.amount > 5000) {
     triggered.push({
       rule: 'HIGH_VELOCITY',
-      detail: `${recentTxCount} transactions in the last 60 minutes`,
+      detail: `${realVelocity} transactions from this sender in the last 60 minutes`,
       weight: 30,
     });
   }
 
   // --- Signal 4: Odd Hours ---
-  // Real signal — uses actual timestamp
   const hour = new Date(transaction.timestamp).getHours();
   if (hour >= 1 && hour <= 4) {
     triggered.push({
@@ -72,7 +82,6 @@ execute: async (transaction) => {
   }
 
   // --- Signal 5: First Time Receiver ---
-  // Only meaningful for larger amounts
   const receiverSeed = Array.from(transaction.receiver_upi)
     .reduce((acc, c) => acc + c.charCodeAt(0), 0);
   const isFirstTime = (seed + receiverSeed) % 3 === 0;
@@ -86,10 +95,7 @@ execute: async (transaction) => {
 
   const score = Math.min(100, triggered.reduce((sum, r) => sum + r.weight, 0));
 
-  return {
-    score,
-    triggered_rules: triggered,
-  };
+  return { score, triggered_rules: triggered };
 },
 });
 
